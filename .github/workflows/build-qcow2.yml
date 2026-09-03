@@ -1,0 +1,100 @@
+name: Build QCOW2 Disk Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Bazzite variant (container image tag)"
+        required: false
+        default: "bazzite-nvidia-open"
+        type: choice
+        options:
+          - bazzite
+          - bazzite-nvidia
+          - bazzite-nvidia-open
+          - bazzite-ally
+          - bazzite-deck
+          - fedora-bootc
+  workflow_run:
+    workflows: ["Build Container Image"]
+    types: [completed]
+    branches: [main]
+
+env:
+  IMAGE_NAME: bazzite-cloud-image
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+  BIB_IMAGE: quay.io/centos-bootc/bootc-image-builder:latest
+
+jobs:
+  build-qcow2:
+    runs-on: ubuntu-24.04
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "tag=bazzite-nvidia-open" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.variant }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman qemu-utils
+
+      - name: Maximize disk space
+        uses: ublue-os/remove-unwanted-software@v9
+        with:
+          remove-codeql: true
+
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Pull container image into rootful storage
+        run: |
+          IMAGE_URI=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
+          sudo podman pull "${IMAGE_URI}"
+
+      - name: Build QCOW2 with bootc-image-builder
+        run: |
+          IMAGE_URI=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
+          mkdir -p output
+          sudo podman run --rm -it \
+            --privileged \
+            --security-opt label=type:unconfined_t \
+            -v /var/lib/containers/storage:/var/lib/containers/storage:Z \
+            -v $(pwd)/image.toml:/config.toml:Z \
+            -v $(pwd)/output:/output:Z \
+            ${{ env.BIB_IMAGE }} \
+            --type qcow2 \
+            --rootfs btrfs \
+            --chown $(id -u):$(id -g) \
+            "${IMAGE_URI}"
+
+      - name: Compress QCOW2
+        run: |
+          qemu-img convert -O qcow2 -c output/qcow2/disk.qcow2 output/bazzite-cloud-image.qcow2
+
+      - name: Generate checksum
+        run: |
+          cd output
+          sha256sum bazzite-cloud-image.qcow2 > bazzite-cloud-image.qcow2.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazzite-cloud-image-${{ steps.tag.outputs.tag }}-qcow2
+          path: |
+            output/bazzite-cloud-image.qcow2
+            output/bazzite-cloud-image.qcow2.sha256
+          retention-days: 30

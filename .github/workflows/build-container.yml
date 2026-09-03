@@ -1,0 +1,89 @@
+name: Build Container Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Containerfile
+      - .github/workflows/build-container.yml
+  schedule:
+    # Weekly rebuild to pick up upstream Bazzite updates
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      base_image:
+        description: "Bazzite variant (base image)"
+        required: false
+        default: "bazzite-nvidia-open"
+        type: choice
+        options:
+          - bazzite
+          - bazzite-nvidia
+          - bazzite-nvidia-open
+          - bazzite-ally
+          - bazzite-deck
+          - fedora-bootc
+
+env:
+  IMAGE_NAME: bazzite-cloud-image
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+  BASE_IMAGE_DEFAULT: bazzite-nvidia-open
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - name: Determine base image
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BASE="${{ github.event.inputs.base_image }}"
+          else
+            BASE="${{ env.BASE_IMAGE_DEFAULT }}"
+          fi
+          case "${BASE}" in
+            fedora-bootc) BASE_URI="quay.io/fedora/fedora-bootc:41" ;;
+            *) BASE_URI="ghcr.io/ublue-os/${BASE}:stable" ;;
+          esac
+          echo "uri=${BASE_URI}" >> "$GITHUB_OUTPUT"
+          echo "variant=${BASE}" >> "$GITHUB_OUTPUT"
+
+      - name: Build container image
+        run: |
+          IMAGE_TAG=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.base.outputs.variant }}
+          podman build --build-arg BASE_IMAGE=${{ steps.base.outputs.uri }} -t "${IMAGE_TAG}" .
+
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push to GHCR
+        run: |
+          IMAGE_TAG=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.base.outputs.variant }}
+          podman push "${IMAGE_TAG}"
+
+      - name: Push latest tag for default variant
+        if: steps.base.outputs.variant == env.BASE_IMAGE_DEFAULT
+        run: |
+          IMAGE_TAG=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.base.outputs.variant }}
+          podman tag "${IMAGE_TAG}" ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          podman push ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Push dated tag
+        run: |
+          DATE_TAG=$(date +%Y%m%d)
+          IMAGE_DATED=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.base.outputs.variant }}-${DATE_TAG}
+          podman tag ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.base.outputs.variant }} "${IMAGE_DATED}"
+          podman push "${IMAGE_DATED}"
