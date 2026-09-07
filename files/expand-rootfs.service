@@ -1,0 +1,19 @@
+[Unit]
+Description=Grow physical root filesystem to fill its partition
+Documentation=https://bootc.dev/bootc/filesystem-sysroot.html
+ConditionPathIsMountPoint=/sysroot
+ConditionPathIsMountPoint=/var
+# cloud-init's growpart module grows the partition first; see
+# /etc/cloud/cloud.cfg.d/93_growpart.cfg. Deliberately no Requires=, so the
+# filesystem is still grown if cloud-init is degraded.
+After=cloud-init.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# systemd-growfs picks the right tool for ext4, xfs and btrfs, and is a no-op
+# if the filesystem already fills the partition.
+ExecStart=/usr/lib/systemd/systemd-growfs /var
+
+[Install]
+WantedBy=multi-user.target

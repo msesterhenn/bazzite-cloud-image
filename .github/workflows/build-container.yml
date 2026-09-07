@@ -20,9 +20,9 @@ on:
           - bazzite
           - bazzite-nvidia
           - bazzite-nvidia-open
-          - bazzite-ally
-          - bazzite-deck
-          - fedora-bootc
+          - bazzite-gnome
+          - bazzite-gnome-nvidia
+          - bazzite-gnome-nvidia-open
 
 env:
   IMAGE_NAME: bazzite-cloud-image
@@ -30,39 +30,53 @@ env:
   BASE_IMAGE_DEFAULT: bazzite-nvidia-open
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.set-matrix.outputs.variants }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "variants=[\"${{ github.event.inputs.base_image }}\"]" >> "$GITHUB_OUTPUT"
+          else
+            echo 'variants=["bazzite","bazzite-nvidia","bazzite-nvidia-open","bazzite-gnome","bazzite-gnome-nvidia","bazzite-gnome-nvidia-open"]' >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: prepare
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.prepare.outputs.variants) }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Maximize disk space
+        uses: ublue-os/remove-unwanted-software@v9
+        with:
+          remove-codeql: true
 
       - name: Set up Podman
         run: |
           sudo apt-get update
           sudo apt-get install -y podman
 
-      - name: Determine base image
+      - name: Determine base image URI
         id: base
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            BASE="${{ github.event.inputs.base_image }}"
-          else
-            BASE="${{ env.BASE_IMAGE_DEFAULT }}"
-          fi
-          case "${BASE}" in
-            fedora-bootc) BASE_URI="quay.io/fedora/fedora-bootc:41" ;;
-            *) BASE_URI="ghcr.io/ublue-os/${BASE}:stable" ;;
-          esac
+          BASE_URI="ghcr.io/ublue-os/${{ matrix.variant }}:stable"
           echo "uri=${BASE_URI}" >> "$GITHUB_OUTPUT"
-          echo "variant=${BASE}" >> "$GITHUB_OUTPUT"
 
       - name: Build container image
         run: |
-          IMAGE_TAG=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.base.outputs.variant }}
+          IMAGE_TAG=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}
           podman build --build-arg BASE_IMAGE=${{ steps.base.outputs.uri }} -t "${IMAGE_TAG}" .
 
       - name: Login to GHCR
@@ -71,19 +85,19 @@ jobs:
 
       - name: Push to GHCR
         run: |
-          IMAGE_TAG=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.base.outputs.variant }}
+          IMAGE_TAG=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}
           podman push "${IMAGE_TAG}"
 
       - name: Push latest tag for default variant
-        if: steps.base.outputs.variant == env.BASE_IMAGE_DEFAULT
+        if: matrix.variant == env.BASE_IMAGE_DEFAULT
         run: |
-          IMAGE_TAG=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.base.outputs.variant }}
+          IMAGE_TAG=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}
           podman tag "${IMAGE_TAG}" ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           podman push ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
       - name: Push dated tag
         run: |
           DATE_TAG=$(date +%Y%m%d)
-          IMAGE_DATED=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.base.outputs.variant }}-${DATE_TAG}
-          podman tag ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.base.outputs.variant }} "${IMAGE_DATED}"
+          IMAGE_DATED=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-${DATE_TAG}
+          podman tag ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }} "${IMAGE_DATED}"
           podman push "${IMAGE_DATED}"

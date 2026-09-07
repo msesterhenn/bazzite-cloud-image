@@ -1,0 +1,119 @@
+#cloud-config
+# Wolf (Games On Whales) deployment via Podman Quadlets
+# For use with bazzite-nvidia-open cloud image on OpenStack
+#
+# Usage:
+#   openstack server create --user-data wolf-userdata.yaml ...
+
+write_files:
+  - path: /etc/containers/systemd/wolf.container
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Wolf / Games On Whales
+      Requires=network-online.target podman.socket
+      After=network-online.target podman.socket
+
+      [Service]
+      TimeoutStartSec=900
+      ExecStartPre=-/usr/bin/podman rm --force WolfPulseAudio
+      Restart=on-failure
+      RestartSec=5
+      StartLimitBurst=5
+
+      [Container]
+      AutoUpdate=registry
+      ContainerName=%p
+      HostName=%p
+      Image=ghcr.io/games-on-whales/wolf:stable
+      Network=host
+      SecurityLabelDisable=true
+      PodmanArgs=--ipc=host --device-cgroup-rule "c 13:* rmw"
+      AddDevice=/dev/dri
+      AddDevice=/dev/uinput
+      AddDevice=/dev/uhid
+      AddDevice=/dev/nvidia-uvm
+      AddDevice=/dev/nvidia-uvm-tools
+      AddDevice=/dev/nvidia-caps/nvidia-cap1
+      AddDevice=/dev/nvidia-caps/nvidia-cap2
+      AddDevice=/dev/nvidiactl
+      AddDevice=/dev/nvidia0
+      AddDevice=/dev/nvidia-modeset
+      Volume=nvidia-driver-vol:/usr/nvidia
+      Volume=/dev/:/dev/:rw
+      Volume=/run/udev:/run/udev:rw
+      Volume=/etc/wolf/:/etc/wolf:z
+      Volume=/run/podman/podman.sock:/var/run/docker.sock:ro
+      Environment=WOLF_STOP_CONTAINER_ON_EXIT=TRUE
+      Environment=NVIDIA_DRIVER_VOLUME_NAME=nvidia-driver-vol
+      Environment=WOLF_RENDER_NODE=/dev/dri/renderD129
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/bin/wolf-update-nvidia-volume
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      echo "Rebuilding nvidia-driver volume..."
+      NV_VERSION=$(cat /sys/module/nvidia/version)
+      podman volume rm nvidia-driver-vol 2>/dev/null || true
+      curl -fsSL https://raw.githubusercontent.com/games-on-whales/gow/master/images/nvidia-driver/Dockerfile | \
+        podman build -t gow/nvidia-driver:latest -f - --build-arg NV_VERSION="${NV_VERSION}" .
+      VOL_NAME=$(podman create --rm --mount source=nvidia-driver-vol,destination=/usr/nvidia gow/nvidia-driver:latest sh | awk '{print $NF}')
+      podman start "$VOL_NAME"
+      podman rm "$VOL_NAME"
+      systemctl restart wolf.service
+      echo "Done. Wolf restarted with NVIDIA driver ${NV_VERSION}."
+
+runcmd:
+  # Enable NVIDIA persistence daemon (ensures all /dev/nvidia* devices are present)
+  - systemctl enable --now nvidia-persistenced.service
+
+  # Verify nvidia-drm modeset=1
+  - |
+    if [ "$(cat /sys/module/nvidia_drm/parameters/modeset)" != "Y" ]; then
+      echo "WARNING: nvidia-drm.modeset is not set to Y. Wolf may not work correctly."
+    fi
+
+  # Enable podman socket (Wolf needs it to manage game containers)
+  - systemctl enable --now podman.socket
+
+  # Install Wolf udev rules for virtual devices (uinput/uhid)
+  - curl -fsSL https://raw.githubusercontent.com/games-on-whales/wolf/stable/85-wolf.rules -o /etc/udev/rules.d/85-wolf.rules
+  - udevadm control --reload-rules
+  - udevadm trigger
+
+  # Create /etc/wolf config directory
+  - mkdir -p /etc/wolf
+
+  # Detect NVIDIA render node and patch Quadlet if not the default renderD129
+  - |
+    NVIDIA_NODE=$(ls -l /sys/class/drm/renderD*/device/driver 2>/dev/null | grep -i nvidia | awk -F/ '{print $NF}' | head -1)
+    if [ -n "$NVIDIA_NODE" ] && [ "$NVIDIA_NODE" != "renderD129" ]; then
+      echo "NVIDIA render node is $NVIDIA_NODE, patching Quadlet..."
+      sed -i "s|WOLF_RENDER_NODE=/dev/dri/renderD129|WOLF_RENDER_NODE=/dev/dri/${NVIDIA_NODE}|" /etc/containers/systemd/wolf.container
+    elif [ -z "$NVIDIA_NODE" ]; then
+      echo "WARNING: No NVIDIA render node found in /sys/class/drm/"
+    else
+      echo "NVIDIA render node is ${NVIDIA_NODE} (default, no patch needed)"
+    fi
+
+  # Build NVIDIA driver image and create volume (manual method)
+  - |
+    NV_VERSION=$(cat /sys/module/nvidia/version)
+    echo "Detected NVIDIA driver version: ${NV_VERSION}"
+    curl -fsSL https://raw.githubusercontent.com/games-on-whales/gow/master/images/nvidia-driver/Dockerfile | \
+      podman build -t gow/nvidia-driver:latest -f - --build-arg NV_VERSION="${NV_VERSION}" .
+
+  # Create and populate the nvidia-driver volume
+  - |
+    VOL_NAME=$(podman create --rm --mount source=nvidia-driver-vol,destination=/usr/nvidia gow/nvidia-driver:latest sh | awk '{print $NF}')
+    podman start "$VOL_NAME"
+    podman rm "$VOL_NAME"
+    podman volume ls | grep nvidia-driver
+
+  # Reload systemd and start Wolf
+  - systemctl daemon-reload
+  - systemctl enable --now wolf.service

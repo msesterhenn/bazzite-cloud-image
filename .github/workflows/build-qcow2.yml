@@ -12,9 +12,9 @@ on:
           - bazzite
           - bazzite-nvidia
           - bazzite-nvidia-open
-          - bazzite-ally
-          - bazzite-deck
-          - fedora-bootc
+          - bazzite-gnome
+          - bazzite-gnome-nvidia
+          - bazzite-gnome-nvidia-open
   workflow_run:
     workflows: ["Build Container Image"]
     types: [completed]
@@ -26,25 +26,34 @@ env:
   BIB_IMAGE: quay.io/centos-bootc/bootc-image-builder:latest
 
 jobs:
-  build-qcow2:
-    runs-on: ubuntu-24.04
+  prepare:
+    runs-on: ubuntu-latest
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      variants: ${{ steps.set-matrix.outputs.variants }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "variants=[\"${{ github.event.inputs.variant }}\"]" >> "$GITHUB_OUTPUT"
+          else
+            echo 'variants=["bazzite","bazzite-nvidia","bazzite-nvidia-open","bazzite-gnome","bazzite-gnome-nvidia","bazzite-gnome-nvidia-open"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  build-qcow2:
+    needs: prepare
+    runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
       packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.prepare.outputs.variants) }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Determine image tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            echo "tag=bazzite-nvidia-open" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${{ github.event.inputs.variant }}" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Set up Podman
         run: |
@@ -56,18 +65,26 @@ jobs:
         with:
           remove-codeql: true
 
+      - name: Free additional disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/local/.ghcup \
+            /usr/share/dotnet /usr/share/swift /usr/share/az* \
+            /opt/ghc /opt/az* /opt/hostedtoolcache
+          sudo apt-get clean
+          df -h /
+
       - name: Login to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Pull container image into rootful storage
         run: |
-          IMAGE_URI=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
+          IMAGE_URI=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}
           sudo podman pull "${IMAGE_URI}"
 
       - name: Build QCOW2 with bootc-image-builder
         run: |
-          IMAGE_URI=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
+          IMAGE_URI=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}
           mkdir -p output
           sudo podman run --rm -it \
             --privileged \
@@ -75,26 +92,34 @@ jobs:
             -v /var/lib/containers/storage:/var/lib/containers/storage:Z \
             -v $(pwd)/image.toml:/config.toml:Z \
             -v $(pwd)/output:/output:Z \
+            -e TMPDIR=/tmp \
             ${{ env.BIB_IMAGE }} \
             --type qcow2 \
             --rootfs btrfs \
             --chown $(id -u):$(id -g) \
             "${IMAGE_URI}"
 
-      - name: Compress QCOW2
+      - name: Compress QCOW2 and free intermediate space
         run: |
           qemu-img convert -O qcow2 -c output/qcow2/disk.qcow2 output/bazzite-cloud-image.qcow2
+          rm -f output/qcow2/disk.qcow2
 
       - name: Generate checksum
         run: |
           cd output
           sha256sum bazzite-cloud-image.qcow2 > bazzite-cloud-image.qcow2.sha256
 
-      - name: Upload artifact
+      - name: Upload QCOW2 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bazzite-cloud-image-${{ steps.tag.outputs.tag }}-qcow2
-          path: |
-            output/bazzite-cloud-image.qcow2
-            output/bazzite-cloud-image.qcow2.sha256
+          name: bazzite-cloud-image-${{ matrix.variant }}-qcow2
+          path: output/bazzite-cloud-image.qcow2
           retention-days: 30
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazzite-cloud-image-${{ matrix.variant }}-checksum
+          path: output/bazzite-cloud-image.qcow2.sha256
+          retention-days: 30
+
