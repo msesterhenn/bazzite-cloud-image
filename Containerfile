@@ -6,6 +6,8 @@ RUN rpm-ostree install qemu-guest-agent cloud-init cloud-utils-growpart
 COPY cloud-init/ /etc/cloud/cloud.cfg.d/
 COPY files/expand-rootfs.service /usr/lib/systemd/system/expand-rootfs.service
 
+COPY files/99-ipv6-eui64.conf /etc/NetworkManager/conf.d/99-ipv6-eui64.conf
+
 RUN touch /etc/plasma-setup-done && \
     mkdir -p /usr/lib/systemd/system/multi-user.target.wants && \
     ln -sf ../expand-rootfs.service \
