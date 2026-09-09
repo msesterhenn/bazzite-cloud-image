@@ -8,7 +8,7 @@ Supports multiple Bazzite variants selectable via CI.
 Two GitHub Actions workflows build the images:
 
 1. **Build Container Image** (`.github/workflows/build-container.yml`) — Derives a custom OCI image from a selectable Bazzite variant, adds `qemu-guest-agent` and `cloud-init`, pushes to GHCR.
-2. **Build QCOW2 Disk Image** (`.github/workflows/build-qcow2.yml`) — Uses [bootc-image-builder](https://github.com/osbuild/osbuild-deploy-container) to convert the container image into a bootable QCOW2 with btrfs rootfs. The QCOW2 is kept as a workflow artifact.
+2. **Build QCOW2 Disk Image** (`.github/workflows/build-qcow2.yml`) — Uses [image-builder](https://github.com/osbuild/image-builder-cli) to convert the container image into a bootable QCOW2 with btrfs rootfs. The QCOW2 is kept as a workflow artifact.
 
 ## Variants
 
@@ -35,7 +35,7 @@ The QCOW2 workflow triggers automatically after a successful container build, or
 
 ## Runner requirements
 
-The QCOW2 build runs `bootc-image-builder` with `--privileged` on GitHub-hosted runners. The workflow frees disk space by removing pre-installed toolchains before building.
+The QCOW2 build runs `image-builder` with `--privileged` on GitHub-hosted runners. The workflow frees disk space by removing pre-installed toolchains before building.
 
 ## Artifacts
 
@@ -73,13 +73,12 @@ mkdir -p output
 sudo podman run --rm -it --privileged \
   --security-opt label=type:unconfined_t \
   -v /var/lib/containers/storage:/var/lib/containers/storage:Z \
-  -v $(pwd)/image.toml:/config.toml:Z \
   -v $(pwd)/output:/output:Z \
-  quay.io/centos-bootc/bootc-image-builder:latest \
-  --type qcow2 \
-  --rootfs btrfs \
-  --local \
-  localhost/bazzite-cloud:latest
+  ghcr.io/osbuild/image-builder-cli:latest \
+  build \
+  --bootc-ref localhost/bazzite-cloud:latest \
+  --bootc-default-fs btrfs \
+  qcow2
 ```
 
 ## Notes

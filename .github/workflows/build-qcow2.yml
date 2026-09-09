@@ -23,7 +23,7 @@ on:
 env:
   IMAGE_NAME: bazzite-cloud-image
   IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
-  BIB_IMAGE: quay.io/centos-bootc/bootc-image-builder:latest
+  BIB_IMAGE: ghcr.io/osbuild/image-builder-cli:latest
 
 jobs:
   prepare:
@@ -82,7 +82,7 @@ jobs:
           IMAGE_URI=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}
           sudo podman pull "${IMAGE_URI}"
 
-      - name: Build QCOW2 with bootc-image-builder
+      - name: Build QCOW2 with image-builder
         run: |
           IMAGE_URI=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}
           mkdir -p output
@@ -90,19 +90,20 @@ jobs:
             --privileged \
             --security-opt label=type:unconfined_t \
             -v /var/lib/containers/storage:/var/lib/containers/storage:Z \
-            -v $(pwd)/image.toml:/config.toml:Z \
             -v $(pwd)/output:/output:Z \
             -e TMPDIR=/tmp \
             ${{ env.BIB_IMAGE }} \
-            --type qcow2 \
-            --rootfs btrfs \
-            --chown $(id -u):$(id -g) \
-            "${IMAGE_URI}"
+            build \
+            --bootc-ref "${IMAGE_URI}" \
+            --bootc-default-fs btrfs \
+            qcow2
+          sudo chown -R $(id -u):$(id -g) output/
 
       - name: Compress QCOW2 and free intermediate space
         run: |
-          qemu-img convert -O qcow2 -c output/qcow2/disk.qcow2 output/bazzite-cloud-image.qcow2
-          rm -f output/qcow2/disk.qcow2
+          QCOW2=$(find output -name '*.qcow2' -type f | head -1)
+          qemu-img convert -O qcow2 -c "${QCOW2}" output/bazzite-cloud-image.qcow2
+          rm -f "${QCOW2}"
 
       - name: Generate checksum
         run: |
