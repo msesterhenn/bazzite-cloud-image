@@ -11,7 +11,8 @@ write_files:
     content: |
       [Unit]
       Description=Wolf / Games On Whales
-      Requires=network-online.target podman.socket
+      Wants=network-online.target
+      Requires=podman.socket
       After=network-online.target podman.socket
 
       [Service]
@@ -46,12 +47,12 @@ write_files:
       Volume=/run/podman/podman.sock:/var/run/docker.sock:ro
       Environment=WOLF_STOP_CONTAINER_ON_EXIT=TRUE
       Environment=NVIDIA_DRIVER_VOLUME_NAME=nvidia-driver-vol
-      Environment=WOLF_RENDER_NODE=/dev/dri/renderD129
+      Environment=WOLF_RENDER_NODE=/dev/dri/renderD128
 
       [Install]
       WantedBy=multi-user.target
 
-  - path: /usr/local/bin/wolf-update-nvidia-volume
+  - path: /etc/wolf/wolf-update-nvidia-volume
     permissions: '0755'
     content: |
       #!/bin/bash
@@ -65,7 +66,55 @@ write_files:
       podman start "$VOL_NAME"
       podman rm "$VOL_NAME"
       systemctl restart wolf.service
+      echo "$NV_VERSION" > /etc/wolf/.nvidia-driver-version
       echo "Done. Wolf restarted with NVIDIA driver ${NV_VERSION}."
+
+  - path: /etc/wolf/wolf-check-nvidia-driver
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      MARKER="/etc/wolf/.nvidia-driver-version"
+      STORED=""
+      CURRENT=$(cat /sys/module/nvidia/version)
+
+      if [ -f "$MARKER" ]; then
+        STORED=$(cat "$MARKER")
+        if [ "$CURRENT" = "$STORED" ]; then
+          echo "NVIDIA driver version unchanged ($CURRENT), skipping volume rebuild."
+          exit 0
+        fi
+      fi
+
+      echo "NVIDIA driver version changed: ${STORED:-none} -> ${CURRENT}, rebuilding volume..."
+      podman volume rm nvidia-driver-vol 2>/dev/null || true
+      curl -fsSL https://raw.githubusercontent.com/games-on-whales/gow/master/images/nvidia-driver/Dockerfile | \
+        podman build -t gow/nvidia-driver:latest -f - --build-arg NV_VERSION="${CURRENT}" .
+      VOL_NAME=$(podman create --rm --mount source=nvidia-driver-vol,destination=/usr/nvidia gow/nvidia-driver:latest sh | awk '{print $NF}')
+      podman start "$VOL_NAME"
+      podman rm "$VOL_NAME"
+      systemctl restart wolf.service
+      echo "$CURRENT" > "$MARKER"
+      echo "Done. Wolf restarted with NVIDIA driver ${CURRENT}."
+
+  - path: /etc/systemd/system/wolf-nvidia-driver-check.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Check and rebuild Wolf NVIDIA driver volume after upgrade
+      Wants=network-online.target
+      After=network-online.target podman.socket nvidia-persistenced.service
+      Before=wolf.service
+      ConditionPathExists=/sys/module/nvidia/version
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/etc/wolf/wolf-check-nvidia-driver
+
+      [Install]
+      WantedBy=multi-user.target
 
 runcmd:
   # Enable NVIDIA persistence daemon (ensures all /dev/nvidia* devices are present)
@@ -88,12 +137,12 @@ runcmd:
   # Create /etc/wolf config directory
   - mkdir -p /etc/wolf
 
-  # Detect NVIDIA render node and patch Quadlet if not the default renderD129
+  # Detect NVIDIA render node and patch Quadlet if not the default renderD128
   - |
-    NVIDIA_NODE=$(ls -l /sys/class/drm/renderD*/device/driver 2>/dev/null | grep -i nvidia | awk -F/ '{print $NF}' | head -1)
-    if [ -n "$NVIDIA_NODE" ] && [ "$NVIDIA_NODE" != "renderD129" ]; then
+    NVIDIA_NODE=$(ls -l /sys/class/drm/renderD*/device/driver 2>/dev/null | grep -i nvidia | grep -oP 'renderD\d+' | head -1)
+    if [ -n "$NVIDIA_NODE" ] && [ "$NVIDIA_NODE" != "renderD128" ]; then
       echo "NVIDIA render node is $NVIDIA_NODE, patching Quadlet..."
-      sed -i "s|WOLF_RENDER_NODE=/dev/dri/renderD129|WOLF_RENDER_NODE=/dev/dri/${NVIDIA_NODE}|" /etc/containers/systemd/wolf.container
+      sed -i "s|WOLF_RENDER_NODE=/dev/dri/renderD128|WOLF_RENDER_NODE=/dev/dri/${NVIDIA_NODE}|" /etc/containers/systemd/wolf.container
     elif [ -z "$NVIDIA_NODE" ]; then
       echo "WARNING: No NVIDIA render node found in /sys/class/drm/"
     else
@@ -115,5 +164,15 @@ runcmd:
     podman volume ls | grep nvidia-driver
 
   # Reload systemd and start Wolf
+  # wolf.service is a generated unit (Quadlet), so systemctl enable fails with
+  # "unit is transient or generated". The [Install] section in the .container
+  # file is processed by the Quadlet generator during daemon-reload.
   - systemctl daemon-reload
-  - systemctl enable --now wolf.service
+  - systemctl restart wolf.service
+
+  # Store the initial driver version so the check service knows the baseline
+  # Written after Wolf starts so a failed first boot will trigger a rebuild retry
+  - cat /sys/module/nvidia/version > /etc/wolf/.nvidia-driver-version
+
+  # Enable the boot-time driver version check (survives ostree upgrades in /etc)
+  - systemctl enable wolf-nvidia-driver-check.service
