@@ -1,7 +1,8 @@
 ARG BASE_IMAGE=ghcr.io/ublue-os/bazzite-nvidia-open:stable
 FROM ${BASE_IMAGE}
 
-RUN rpm-ostree install qemu-guest-agent cloud-init cloud-utils-growpart
+RUN dnf5 install -y qemu-guest-agent cloud-init cloud-utils-growpart && \
+    dnf5 clean all
 
 COPY cloud-init/ /etc/cloud/cloud.cfg.d/
 COPY files/expand-rootfs.service /usr/lib/systemd/system/expand-rootfs.service
